@@ -3,3 +3,8 @@ I/O scheduler sda	WARN
 Mount /	OK
 Mount /var/lib/postgresql	CRIT
 vm.swappiness	SKIP
+Open files (postgres)	CRIT
+Processes (postgres)	WARN
+fs.file-max	WARN
+CPU governor	OK
+tuned profile	OK

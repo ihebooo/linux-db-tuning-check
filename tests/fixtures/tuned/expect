@@ -9,3 +9,8 @@ I/O scheduler nvme0n1	OK
 I/O scheduler sdb	OK
 Mount /	OK
 Mount /var/lib/pgsql	OK
+Open files (postgres)	OK
+Processes (postgres)	OK
+fs.file-max	OK
+CPU governor	OK
+tuned profile	OK

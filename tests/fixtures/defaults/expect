@@ -8,3 +8,8 @@ NUMA	WARN
 I/O scheduler sda	WARN
 Mount /	OK
 Mount /data pg	WARN
+Open files (postgres)	WARN
+Processes (postgres)	OK
+fs.file-max	OK
+CPU governor	WARN
+tuned profile	WARN

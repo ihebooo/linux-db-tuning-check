@@ -5,7 +5,7 @@
 # See --help for usage and exit codes.
 set -euo pipefail
 
-readonly VERSION="0.0.4"
+readonly VERSION="0.0.5"
 readonly PROG=${0##*/}
 
 usage() {
@@ -314,11 +314,107 @@ check_storage() {
   (( found )) || add "$sec" "Mounts" "no ext4/xfs/btrfs/zfs mount" SKIP "nothing to check in /proc/mounts"
 }
 
+# ---------------------------------------------------------------- limits and CPU
+
+# conf_limit USER ITEM: soft value of ITEM for USER from limits.conf and limits.d
+# (a line for the user wins over "*"); empty if not set.
+conf_limit() {
+  local f files=() u_val="" any_val="" dom typ item val
+  [ -r "$ROOT/etc/security/limits.conf" ] && files+=("$ROOT/etc/security/limits.conf")
+  for f in "$ROOT"/etc/security/limits.d/*.conf; do [ -r "$f" ] && files+=("$f"); done
+  (( ${#files[@]} )) || return 0
+  while read -r dom typ item val _; do
+    [ "$item" = "$2" ] || continue
+    case $typ in soft|-) ;; *) continue ;; esac
+    case $dom in "$1") u_val=$val ;; \*) any_val=$val ;; esac
+  done < <(grep -hv '^[[:space:]]*#' "${files[@]}" 2>/dev/null || true)
+  printf '%s\n' "${u_val:-$any_val}"
+}
+
+check_limits_cpu() {
+  local sec="Limits and CPU" uid="" p pid="" nofile="" nproc="" src v govs g n prof
+
+  uid=$(awk -F: -v u="$DB_USER" '$1 == u { print $3; exit }' "$ROOT/etc/passwd" 2>/dev/null || true)
+  if [ -z "$uid" ]; then
+    add "$sec" "Open files ($DB_USER)" "user not found" SKIP "no user $DB_USER in /etc/passwd: pass the database OS user with --db-user"
+  else
+    for p in "$ROOT"/proc/[0-9]*; do
+      [ -r "$p/status" ] && [ -r "$p/limits" ] || continue
+      if awk -v u="$uid" '$1 == "Uid:" && $2 == u { f = 1 } END { exit !f }' "$p/status"; then
+        pid=${p##*/}; break
+      fi
+    done
+    if [ -n "$pid" ]; then
+      nofile=$(awk '/^Max open files/ { print $4 }' "$ROOT/proc/$pid/limits")
+      nproc=$(awk '/^Max processes/ { print $3 }' "$ROOT/proc/$pid/limits")
+      src="running process $pid"
+    else
+      nofile=$(conf_limit "$DB_USER" nofile)
+      nproc=$(conf_limit "$DB_USER" nproc)
+      src="limits.conf, no process running"
+      [ -n "$nofile" ] || { nofile=1024; src="kernel default, no process running"; }
+    fi
+
+    if [ "$nofile" = unlimited ] || (( nofile >= 4096 )); then
+      add "$sec" "Open files ($DB_USER)" "$nofile ($src)" OK "enough file descriptors for the database's tables, indexes and connections"
+    elif (( nofile < 1024 )); then
+      add "$sec" "Open files ($DB_USER)" "$nofile ($src)" CRIT "far too few file descriptors: the database fails with 'too many open files'; set nofile 65536 (LimitNOFILE= in the systemd unit, or limits.d)"
+    else
+      add "$sec" "Open files ($DB_USER)" "$nofile ($src)" WARN "raise to 65536: LimitNOFILE=65536 in the systemd unit (services ignore limits.conf) or nofile in /etc/security/limits.d/"
+    fi
+
+    if [ -z "$nproc" ] || [ "$nproc" = unlimited ]; then
+      add "$sec" "Processes ($DB_USER)" "${nproc:-not limited} ($src)" OK "no per-user process limit"
+    elif (( nproc >= 4096 )); then
+      add "$sec" "Processes ($DB_USER)" "$nproc ($src)" OK "enough for one backend process per connection"
+    else
+      add "$sec" "Processes ($DB_USER)" "$nproc ($src)" WARN "each connection is a process: raise nproc to at least 4096 (LimitNPROC= or limits.d)"
+    fi
+  fi
+
+  if v=$(rd /proc/sys/fs/file-max); then
+    if (( ${#v} > 12 || v >= 65536 )); then
+      add "$sec" fs.file-max "$v" OK "the system-wide file limit is not a bottleneck"
+    else
+      add "$sec" fs.file-max "$v" WARN "system-wide limit below 65536: set fs.file-max=6553600 in /etc/sysctl.d/"
+    fi
+  else
+    add "$sec" fs.file-max "?" SKIP "cannot read /proc/sys/fs/file-max"
+  fi
+
+  govs=$(cat "$ROOT"/sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_governor 2>/dev/null | sort | uniq -c | awk '{ printf "%s%s x%s", (NR > 1 ? ", " : ""), $2, $1 }' || true)
+  if [ -z "$govs" ]; then
+    add "$sec" "CPU governor" "not exposed" OK "no cpufreq control (virtual machine or fixed frequency)"
+  else
+    n=OK
+    for g in powersave conservative ondemand; do
+      [[ $govs == *"$g x"* ]] && n=WARN
+    done
+    if [ "$n" = WARN ]; then
+      add "$sec" "CPU governor" "$govs" WARN "CPUs clock down between queries and add latency: use the performance governor (tuned profile throughput-performance, or cpupower frequency-set -g performance)"
+    else
+      add "$sec" "CPU governor" "$govs" OK "CPUs run at full speed when the database needs them"
+    fi
+  fi
+
+  if prof=$(rd /etc/tuned/active_profile); then
+    case $prof in
+      balanced*|powersave*|desktop*|laptop*|"")
+        add "$sec" "tuned profile" "${prof:-none}" WARN "a power-saving profile: switch with tuned-adm profile throughput-performance" ;;
+      *)
+        add "$sec" "tuned profile" "$prof" OK "a server profile" ;;
+    esac
+  else
+    add "$sec" "tuned profile" "not installed" OK "no tuned: make sure the sysctl and udev settings above persist on their own"
+  fi
+}
+
 # ---------------------------------------------------------------- report
 
 check_memory
 check_hugepages_numa
 check_storage
+check_limits_cpu
 
 ok=0 warn=0 crit=0
 for s in "${r_status[@]}"; do
