@@ -1,0 +1,4 @@
+exit	0
+vm.swappiness	OK
+vm.dirty_*	OK
+vm.overcommit_memory	OK

@@ -10,7 +10,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: ShellCheck
-        run: shellcheck db_tuning_check.sh
+        run: shellcheck db_tuning_check.sh tests/*.sh
 
   cli:
     runs-on: ubuntu-latest
@@ -21,13 +21,25 @@ jobs:
           ./db_tuning_check.sh --help | grep -q '^Usage:'
           ./db_tuning_check.sh -h | grep -q '^Usage:'
           ./db_tuning_check.sh --version | grep -q '^db_tuning_check.sh '
-      - name: Unknown option and missing --db-user value give exit 3
+      - name: Bad options give exit 3
         run: |
           set +e
           ./db_tuning_check.sh --nope; rc=$?; echo "exit code: $rc"; [ "$rc" -eq 3 ] || exit 1
           ./db_tuning_check.sh --db-user; rc=$?; echo "exit code: $rc"; [ "$rc" -eq 3 ] || exit 1
+          ./db_tuning_check.sh --sysroot /nonexistent; rc=$?; echo "exit code: $rc"; [ "$rc" -eq 3 ] || exit 1
       - name: Report runs on the runner
         run: |
-          ./db_tuning_check.sh -u runner | tee report.md
+          set +e; ./db_tuning_check.sh -u runner > report.md; rc=$?; set -e
+          cat report.md; echo "exit code: $rc"
+          [ "$rc" -le 2 ]
           grep -q '^# Linux DB tuning check' report.md
           grep -q '| DB OS user | runner |' report.md
+          grep -Eq '^Overall: \*\*(OK|WARN|CRIT)\*\*' report.md
+          grep -Eq '^\| vm\.swappiness \| [0-9]+ \| (OK|WARN) \|' report.md
+
+  fixtures:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Every fixture host gets the expected statuses and exit code
+        run: tests/run-fixtures.sh

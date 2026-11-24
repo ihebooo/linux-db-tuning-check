@@ -1,0 +1,6 @@
+MemTotal:       65650204 kB
+MemFree:         3203916 kB
+SwapTotal:       4194300 kB
+CommitLimit:    59414380 kB
+HugePages_Total:    8500
+Hugepagesize:       2048 kB
