@@ -1,4 +1,3 @@
-    mnt=$(printf '%b' "$mnt")   # /proc/mounts escapes a space as \040
 #!/usr/bin/env bash
 # db_tuning_check.sh - check a Linux host's kernel and OS settings for a database server.
 #
@@ -251,7 +250,7 @@ check_hugepages_numa() {
 
 check_storage() {
   local sec=Storage dev name sch rot kind found=0
-  local mdev mnt fs opts atime issues level hint
+  local mnt fs opts atime issues level hint
 
   for dev in "$ROOT"/sys/block/*; do
     [ -e "$dev/queue/scheduler" ] || continue
@@ -276,10 +275,10 @@ check_storage() {
   (( found )) || add "$sec" "I/O scheduler" "no disk found" SKIP "no block device with a scheduler in /sys/block"
 
   found=0
-  while read -r mdev mnt fs opts _; do
+  while read -r _ mnt fs opts _; do
     case $fs in ext2|ext3|ext4|xfs|btrfs|zfs) ;; *) continue ;; esac
     found=1
-
+    mnt=$(printf '%b' "$mnt")   # /proc/mounts escapes a space as \040
     case ,$opts, in
       *,noatime,*)     atime=noatime ;;
       *,relatime,*)    atime=relatime ;;
@@ -293,14 +292,14 @@ check_storage() {
     esac
     case $fs in
       ext2|ext3)
-        [ $level = CRIT ] || level=WARN
+        [ "$level" = CRIT ] || level=WARN
         issues+=("$fs is outdated for a database: use xfs or ext4") ;;
       btrfs)
-        [ $level = CRIT ] || level=WARN
+        [ "$level" = CRIT ] || level=WARN
         issues+=("btrfs copy-on-write fragments database files: use xfs/ext4, or chattr +C on the data directory") ;;
     esac
     if [ "$atime" = strictatime ]; then
-      [ $level = CRIT ] || level=WARN
+      [ "$level" = CRIT ] || level=WARN
       issues+=("every read updates the access time: mount with noatime")
     fi
     if (( ${#issues[@]} )); then
