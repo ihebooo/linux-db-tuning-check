@@ -1,3 +1,4 @@
+    mnt=$(printf '%b' "$mnt")   # /proc/mounts escapes a space as \040
 #!/usr/bin/env bash
 # db_tuning_check.sh - check a Linux host's kernel and OS settings for a database server.
 #
@@ -5,7 +6,7 @@
 # See --help for usage and exit codes.
 set -euo pipefail
 
-readonly VERSION="0.0.3"
+readonly VERSION="0.0.4"
 readonly PROG=${0##*/}
 
 usage() {
@@ -229,7 +230,10 @@ check_hugepages_numa() {
     add "$sec" "Huge pages" "?" SKIP "no Hugepagesize in /proc/meminfo"
   fi
 
-  nodes=$(find "$ROOT/sys/devices/system/node" -maxdepth 1 -name 'node[0-9]*' 2>/dev/null | wc -l)
+  nodes=0
+  for zr in "$ROOT"/sys/devices/system/node/node[0-9]*; do
+    [ -d "$zr" ] && nodes=$((nodes + 1))
+  done
   if (( nodes <= 1 )); then
     add "$sec" "NUMA" "1 node" OK "single NUMA node: nothing to tune"
   elif zr=$(rd /proc/sys/vm/zone_reclaim_mode); then
@@ -243,10 +247,79 @@ check_hugepages_numa() {
   fi
 }
 
+# ---------------------------------------------------------------- storage
+
+check_storage() {
+  local sec=Storage dev name sch rot kind found=0
+  local mdev mnt fs opts atime issues level hint
+
+  for dev in "$ROOT"/sys/block/*; do
+    [ -e "$dev/queue/scheduler" ] || continue
+    name=${dev##*/}
+    case $name in loop*|ram*|zram*|sr*|fd*|dm-*|md*|nbd*) continue ;; esac
+    found=1
+    sch=$(rd "/sys/block/$name/queue/scheduler") && sch=$(selected "$sch") || sch="?"
+    rot=$(rd "/sys/block/$name/queue/rotational" || echo 0)
+    if (( rot == 1 )); then kind=HDD; else kind="SSD/NVMe"; fi
+    case $kind:$sch in
+      HDD:mq-deadline|HDD:deadline|"SSD/NVMe":none|"SSD/NVMe":noop|"SSD/NVMe":mq-deadline|"SSD/NVMe":deadline|"SSD/NVMe":kyber)
+        add "$sec" "I/O scheduler $name" "$sch ($kind)" OK "a good fit for a database on $kind" ;;
+      HDD:none|HDD:noop)
+        add "$sec" "I/O scheduler $name" "$sch ($kind)" WARN "a spinning disk needs request reordering: use mq-deadline (udev rule or a tuned profile)" ;;
+      *:\?)
+        add "$sec" "I/O scheduler $name" "? ($kind)" SKIP "cannot read the scheduler" ;;
+      *)
+        if [ "$kind" = HDD ]; then hint="use mq-deadline"; else hint="use none or mq-deadline"; fi
+        add "$sec" "I/O scheduler $name" "$sch ($kind)" WARN "$sch is tuned for desktops and adds latency under a database load: $hint (udev rule or a tuned profile)" ;;
+    esac
+  done
+  (( found )) || add "$sec" "I/O scheduler" "no disk found" SKIP "no block device with a scheduler in /sys/block"
+
+  found=0
+  while read -r mdev mnt fs opts _; do
+    case $fs in ext2|ext3|ext4|xfs|btrfs|zfs) ;; *) continue ;; esac
+    found=1
+
+    case ,$opts, in
+      *,noatime,*)     atime=noatime ;;
+      *,relatime,*)    atime=relatime ;;
+      *,lazytime,*)    atime=lazytime ;;
+      *)               atime=strictatime ;;
+    esac
+    issues=() level=OK
+    case ,$opts, in
+      *,nobarrier,*|*,barrier=0,*)
+        level=CRIT; issues+=("write barriers are off: a power loss can corrupt the database; remove nobarrier/barrier=0") ;;
+    esac
+    case $fs in
+      ext2|ext3)
+        [ $level = CRIT ] || level=WARN
+        issues+=("$fs is outdated for a database: use xfs or ext4") ;;
+      btrfs)
+        [ $level = CRIT ] || level=WARN
+        issues+=("btrfs copy-on-write fragments database files: use xfs/ext4, or chattr +C on the data directory") ;;
+    esac
+    if [ "$atime" = strictatime ]; then
+      [ $level = CRIT ] || level=WARN
+      issues+=("every read updates the access time: mount with noatime")
+    fi
+    if (( ${#issues[@]} )); then
+      hint=$(printf '%s. ' "${issues[@]}"); hint=${hint%. }
+    elif [ "$atime" = noatime ]; then
+      hint="no access-time writes, barriers on"
+    else
+      hint="fine; noatime saves a few more writes"
+    fi
+    add "$sec" "Mount $mnt" "$fs, $atime" "$level" "$hint"
+  done < <(cat "$ROOT/proc/mounts" 2>/dev/null || true)
+  (( found )) || add "$sec" "Mounts" "no ext4/xfs/btrfs/zfs mount" SKIP "nothing to check in /proc/mounts"
+}
+
 # ---------------------------------------------------------------- report
 
 check_memory
 check_hugepages_numa
+check_storage
 
 ok=0 warn=0 crit=0
 for s in "${r_status[@]}"; do

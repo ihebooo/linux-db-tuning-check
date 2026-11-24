@@ -1,0 +1,2 @@
+/dev/sda2 / ext4 rw,relatime 0 0
+/dev/sda3 /var/lib/postgresql ext4 rw,noatime,nobarrier 0 0

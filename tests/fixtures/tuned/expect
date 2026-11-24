@@ -5,3 +5,7 @@ vm.overcommit_memory	OK
 Transparent Huge Pages	OK
 Huge pages	OK
 NUMA	OK
+I/O scheduler nvme0n1	OK
+I/O scheduler sdb	OK
+Mount /	OK
+Mount /var/lib/pgsql	OK

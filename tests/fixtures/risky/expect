@@ -1,0 +1,5 @@
+exit	2
+I/O scheduler sda	WARN
+Mount /	OK
+Mount /var/lib/postgresql	CRIT
+vm.swappiness	SKIP

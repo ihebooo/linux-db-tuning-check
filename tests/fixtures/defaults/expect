@@ -5,3 +5,6 @@ vm.overcommit_memory	WARN
 Transparent Huge Pages	WARN
 Huge pages	OK
 NUMA	WARN
+I/O scheduler sda	WARN
+Mount /	OK
+Mount /data pg	WARN
