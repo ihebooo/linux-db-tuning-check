@@ -2,3 +2,6 @@ exit	1
 vm.swappiness	WARN
 vm.dirty_*	WARN
 vm.overcommit_memory	WARN
+Transparent Huge Pages	WARN
+Huge pages	OK
+NUMA	WARN

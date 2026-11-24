@@ -2,3 +2,6 @@ exit	0
 vm.swappiness	OK
 vm.dirty_*	OK
 vm.overcommit_memory	OK
+Transparent Huge Pages	OK
+Huge pages	OK
+NUMA	OK

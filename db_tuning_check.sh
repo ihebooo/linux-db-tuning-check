@@ -5,7 +5,7 @@
 # See --help for usage and exit codes.
 set -euo pipefail
 
-readonly VERSION="0.0.2"
+readonly VERSION="0.0.3"
 readonly PROG=${0##*/}
 
 usage() {
@@ -17,6 +17,9 @@ a database such as PostgreSQL, and print OK / WARN / CRIT with a hint.
 
 Options:
   -u, --db-user USER  database OS user for the ulimit checks (default: postgres)
+  -s, --shared-buffers SIZE
+                      planned PostgreSQL shared_buffers, e.g. 8GB, for the
+                      huge pages check (default: 25 % of RAM)
       --sysroot DIR   read /proc, /sys and /etc under DIR instead of /
                       (a saved snapshot of another host, or test fixtures)
   -h, --help          show this help and exit
@@ -37,22 +40,40 @@ die() { echo "$PROG: $*" >&2; exit 3; }
 
 DB_USER=postgres
 ROOT=""
+SB=""
 
 while [ $# -gt 0 ]; do
   case $1 in
     -h|--help)    usage; exit 0 ;;
     -V|--version) echo "$PROG $VERSION"; exit 0 ;;
-    -u|--db-user|--sysroot)
+    -u|--db-user|--sysroot|-s|--shared-buffers)
       [ $# -ge 2 ] || die "$1 needs a value (see --help)"
-      case $1 in --sysroot) ROOT=$2 ;; *) DB_USER=$2 ;; esac
+      case $1 in --sysroot) ROOT=$2 ;; -s|--shared-buffers) SB=$2 ;; *) DB_USER=$2 ;; esac
       shift 2 ;;
     --db-user=*)  DB_USER=${1#*=}; shift ;;
+    --shared-buffers=*) SB=${1#*=}; shift ;;
     --sysroot=*)  ROOT=${1#*=}; shift ;;
     *)            die "unknown option: $1 (see --help)" ;;
   esac
 done
 
 [ -n "$DB_USER" ] || die "--db-user must not be empty"
+
+# to_bytes SIZE: PostgreSQL-style size (8GB, 512MB, 1TB, 64kB) to bytes.
+to_bytes() {
+  local n u
+  [[ $1 =~ ^([0-9]+)[[:space:]]*([kKmMgGtT])[bB]?$ ]] || return 1
+  n=${BASH_REMATCH[1]} u=${BASH_REMATCH[2]}
+  case $u in
+    k|K) echo $(( n * 1024 )) ;;
+    m|M) echo $(( n * 1024 ** 2 )) ;;
+    g|G) echo $(( n * 1024 ** 3 )) ;;
+    t|T) echo $(( n * 1024 ** 4 )) ;;
+  esac
+}
+if [ -n "$SB" ]; then
+  SB=$(to_bytes "$SB") || die "--shared-buffers needs a size with a unit, e.g. 8GB or 512MB"
+fi
 if [ -n "$ROOT" ]; then
   ROOT=${ROOT%/}
   [ -d "$ROOT/proc" ] || die "--sysroot $ROOT has no proc/ directory"
@@ -95,6 +116,14 @@ add() {
   case $4 in WARN) n=1 ;; CRIT) n=2 ;; esac
   (( n > worst )) && worst=$n
   r_sec+=("$1") r_name+=("$2") r_value+=("$3") r_status+=("$4") r_hint+=("$5")
+}
+
+# selected "a [b] c": the bracketed choice of a sysfs selector ("b").
+selected() {
+  local s=$1
+  [[ $s == *\[*\]* ]] || { printf '%s\n' "$s"; return; }
+  s=${s#*[}
+  printf '%s\n' "${s%%]*}"
 }
 
 # Cells must not break the Markdown table.
@@ -160,9 +189,64 @@ check_memory() {
   fi
 }
 
+# ---------------------------------------------------------------- huge pages and NUMA
+
+check_hugepages_numa() {
+  local sec="Huge pages and NUMA" en df total size_kb hp sb need nr nodes zr sbtxt
+
+  if en=$(rd /sys/kernel/mm/transparent_hugepage/enabled); then
+    en=$(selected "$en")
+    df=$(rd /sys/kernel/mm/transparent_hugepage/defrag) && df=$(selected "$df") || df="?"
+    if [ "$en" = always ]; then
+      add "$sec" "Transparent Huge Pages" "enabled=$en, defrag=$df" WARN "disable THP for database hosts: compaction and khugepaged cause latency spikes; boot with transparent_hugepage=never or use a tuned profile that sets it"
+    else
+      add "$sec" "Transparent Huge Pages" "enabled=$en, defrag=$df" OK "THP is not forced on every allocation"
+    fi
+  else
+    add "$sec" "Transparent Huge Pages" "?" SKIP "THP not available in this kernel"
+  fi
+
+  total=$(meminfo HugePages_Total) size_kb=$(meminfo Hugepagesize)
+  if (( size_kb > 0 )); then
+    hp=$(( total * size_kb * 1024 ))
+    if [ -n "$SB" ]; then sb=$SB sbtxt="shared_buffers $(hb "$SB")"
+    else sb=$(( mem_b / 4 )) sbtxt="shared_buffers 25 % of RAM = $(hb "$sb")"
+    fi
+    need=$(( sb + sb / 20 ))
+    nr=$(( (need + size_kb * 1024 - 1) / (size_kb * 1024) ))
+    if (( total == 0 )); then
+      if (( sb >= 8 * 1024 ** 3 )); then
+        add "$sec" "Huge pages" "none reserved; $sbtxt" WARN "with large shared_buffers every backend's page tables cost a lot of RAM: set vm.nr_hugepages=$nr and huge_pages=try in postgresql.conf"
+      else
+        add "$sec" "Huge pages" "none reserved; $sbtxt" OK "not needed below 8 GiB of shared_buffers; above that reserve vm.nr_hugepages"
+      fi
+    elif (( hp < need )); then
+      add "$sec" "Huge pages" "$total x $(hb $(( size_kb * 1024 ))) = $(hb "$hp"); $sbtxt" WARN "fewer huge pages than shared_buffers + 5 %: PostgreSQL falls back to normal pages (huge_pages=try) or does not start (huge_pages=on); set vm.nr_hugepages=$nr"
+    else
+      add "$sec" "Huge pages" "$total x $(hb $(( size_kb * 1024 ))) = $(hb "$hp"); $sbtxt" OK "enough huge pages for shared_buffers; set huge_pages=on in postgresql.conf to be sure they are used"
+    fi
+  else
+    add "$sec" "Huge pages" "?" SKIP "no Hugepagesize in /proc/meminfo"
+  fi
+
+  nodes=$(find "$ROOT/sys/devices/system/node" -maxdepth 1 -name 'node[0-9]*' 2>/dev/null | wc -l)
+  if (( nodes <= 1 )); then
+    add "$sec" "NUMA" "1 node" OK "single NUMA node: nothing to tune"
+  elif zr=$(rd /proc/sys/vm/zone_reclaim_mode); then
+    if (( zr != 0 )); then
+      add "$sec" "NUMA" "$nodes nodes, vm.zone_reclaim_mode=$zr" WARN "set vm.zone_reclaim_mode=0: otherwise the kernel drops local page cache instead of using memory on the other node"
+    else
+      add "$sec" "NUMA" "$nodes nodes, vm.zone_reclaim_mode=0" OK "the whole RAM is used as cache across nodes"
+    fi
+  else
+    add "$sec" "NUMA" "$nodes nodes" SKIP "cannot read /proc/sys/vm/zone_reclaim_mode"
+  fi
+}
+
 # ---------------------------------------------------------------- report
 
 check_memory
+check_hugepages_numa
 
 ok=0 warn=0 crit=0
 for s in "${r_status[@]}"; do
