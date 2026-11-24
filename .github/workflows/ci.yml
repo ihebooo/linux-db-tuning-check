@@ -87,4 +87,11 @@ jobs:
           [ "${rc:-0}" -le 2 ]
           jq -e '.checks | length > 8' out.json
           jq -e '.os | length > 0' out.json
+          # the README snapshot recipe, then the same check on the copy
+          docker run --rm -v "$PWD:/src" -w /src "${{ matrix.image }}" bash -c '
+            sed -n "/^for f in \/proc\/meminfo/,/^tar czf/p" README.md | grep -v "^tar " > /tmp/snap.sh
+            cd /tmp; bash /tmp/snap.sh
+            /src/db_tuning_check.sh --sysroot /tmp/snap --db-user root > /tmp/snap.md; rc=$?
+            cat /tmp/snap.md; echo "exit code: $rc"; [ "$rc" -le 2 ] &&
+            grep -Eq "^\| vm\.swappiness \| [0-9]+ \| (OK|WARN) \|" /tmp/snap.md'
           jq -r '.os, .status, (.checks[] | "\(.status)	\(.check)	\(.value)")' out.json

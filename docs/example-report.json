@@ -1,0 +1,194 @@
+{
+  "tool": "db_tuning_check",
+  "version": "0.1.0",
+  "host": "db-defaults",
+  "os": "Rocky Linux 9.4 (Blue Onyx)",
+  "kernel": "5.14.0-427.el9.x86_64",
+  "cpus": 8,
+  "ram_bytes": 16695209984,
+  "db_user": "postgres",
+  "status": "WARN",
+  "counts": {
+    "ok": 4,
+    "warn": 10,
+    "crit": 0,
+    "skip": 0
+  },
+  "checks": [
+    {
+      "section": "Memory",
+      "check": "vm.swappiness",
+      "value": "60",
+      "status": "WARN",
+      "hint": "set vm.swappiness=1 in /etc/sysctl.d/: at 60 the kernel swaps out database memory when the page cache grows"
+    },
+    {
+      "section": "Memory",
+      "check": "vm.dirty_*",
+      "value": "background 10 % = 1.6 GiB, limit 20 % = 3.1 GiB",
+      "status": "WARN",
+      "hint": "too much dirty data before write-back: checkpoints flush it in bursts that stall queries; set vm.dirty_background_bytes=268435456 and vm.dirty_bytes=1073741824"
+    },
+    {
+      "section": "Memory",
+      "check": "vm.overcommit_memory",
+      "value": "1",
+      "status": "WARN",
+      "hint": "always overcommit: under memory pressure the OOM killer kills a backend or the postmaster; use 2 (with vm.overcommit_ratio) or 0"
+    },
+    {
+      "section": "Huge pages and NUMA",
+      "check": "Transparent Huge Pages",
+      "value": "enabled=always, defrag=madvise",
+      "status": "WARN",
+      "hint": "disable THP for database hosts: compaction and khugepaged cause latency spikes; boot with transparent_hugepage=never or use a tuned profile that sets it"
+    },
+    {
+      "section": "Huge pages and NUMA",
+      "check": "Huge pages",
+      "value": "none reserved; shared_buffers 25 % of RAM = 3.9 GiB",
+      "status": "OK",
+      "hint": "not needed below 8 GiB of shared_buffers; above that reserve vm.nr_hugepages"
+    },
+    {
+      "section": "Huge pages and NUMA",
+      "check": "NUMA",
+      "value": "2 nodes, vm.zone_reclaim_mode=1",
+      "status": "WARN",
+      "hint": "set vm.zone_reclaim_mode=0: otherwise the kernel drops local page cache instead of using memory on the other node"
+    },
+    {
+      "section": "Storage",
+      "check": "I/O scheduler sda",
+      "value": "bfq (SSD/NVMe)",
+      "status": "WARN",
+      "hint": "bfq is tuned for desktops and adds latency under a database load: use none or mq-deadline (udev rule or a tuned profile)"
+    },
+    {
+      "section": "Storage",
+      "check": "Mount /",
+      "value": "xfs, relatime",
+      "status": "OK",
+      "hint": "fine; noatime saves a few more writes"
+    },
+    {
+      "section": "Storage",
+      "check": "Mount /data pg",
+      "value": "ext3, strictatime",
+      "status": "WARN",
+      "hint": "ext3 is outdated for a database: use xfs or ext4; every read updates the access time: mount with noatime"
+    },
+    {
+      "section": "Limits and CPU",
+      "check": "Open files (postgres)",
+      "value": "1024 (running process 4242)",
+      "status": "WARN",
+      "hint": "raise to 65536: LimitNOFILE=65536 in the systemd unit (services ignore limits.conf) or nofile in /etc/security/limits.d/"
+    },
+    {
+      "section": "Limits and CPU",
+      "check": "Processes (postgres)",
+      "value": "63000 (running process 4242)",
+      "status": "OK",
+      "hint": "enough for one backend process per connection"
+    },
+    {
+      "section": "Limits and CPU",
+      "check": "fs.file-max",
+      "value": "9223372036854775807",
+      "status": "OK",
+      "hint": "the system-wide file limit is not a bottleneck"
+    },
+    {
+      "section": "Limits and CPU",
+      "check": "CPU governor",
+      "value": "powersave x2",
+      "status": "WARN",
+      "hint": "CPUs clock down between queries and add latency: use the performance governor (tuned profile throughput-performance, or cpupower frequency-set -g performance)"
+    },
+    {
+      "section": "Limits and CPU",
+      "check": "tuned profile",
+      "value": "balanced",
+      "status": "WARN",
+      "hint": "a power-saving profile: switch with tuned-adm profile throughput-performance"
+    }
+  ],
+  "postgresql": [
+    {
+      "setting": "shared_buffers",
+      "value": "3840MB",
+      "why": "25 % of RAM: the rest stays for the OS page cache, which PostgreSQL also reads through"
+    },
+    {
+      "setting": "effective_cache_size",
+      "value": "11GB",
+      "why": "75 % of RAM: shared_buffers plus the page cache the planner can count on (no memory is allocated)"
+    },
+    {
+      "setting": "maintenance_work_mem",
+      "value": "995MB",
+      "why": "RAM / 16, at most 2GB: faster VACUUM and CREATE INDEX"
+    },
+    {
+      "setting": "work_mem",
+      "value": "39MB",
+      "why": "(RAM - shared_buffers) / (max_connections 100 x 3): per sort or hash, so a query can use several; raise per session for reports"
+    },
+    {
+      "setting": "max_wal_size",
+      "value": "4GB",
+      "why": "fewer, calmer checkpoints than the 1GB default; watch checkpoints_req in pg_stat_bgwriter / pg_stat_checkpointer"
+    },
+    {
+      "setting": "min_wal_size",
+      "value": "1GB",
+      "why": "a quarter of max_wal_size: WAL files are recycled instead of created"
+    },
+    {
+      "setting": "checkpoint_completion_target",
+      "value": "0.9",
+      "why": "spread checkpoint writes over 90 % of the interval (default since PostgreSQL 14)"
+    },
+    {
+      "setting": "random_page_cost",
+      "value": "1.1",
+      "why": "SSD/NVMe (non-rotational disks detected): a random read costs about the same as a sequential one, so index scans get chosen"
+    },
+    {
+      "setting": "effective_io_concurrency",
+      "value": "200",
+      "why": "SSD/NVMe (non-rotational disks detected): many I/O requests in flight for bitmap heap scans"
+    },
+    {
+      "setting": "max_worker_processes",
+      "value": "8",
+      "why": "one per CPU (8), at least the default 8"
+    },
+    {
+      "setting": "max_parallel_workers",
+      "value": "8",
+      "why": "one per CPU"
+    },
+    {
+      "setting": "max_parallel_workers_per_gather",
+      "value": "4",
+      "why": "half the CPUs, at most 4: one query must not take every core"
+    },
+    {
+      "setting": "max_parallel_maintenance_workers",
+      "value": "4",
+      "why": "half the CPUs, at most 4, for CREATE INDEX"
+    },
+    {
+      "setting": "huge_pages",
+      "value": "try",
+      "why": "use huge pages once vm.nr_hugepages=2090 is reserved; falls back to normal pages until then"
+    },
+    {
+      "setting": "max_connections",
+      "value": "100",
+      "why": "more than 4 x CPUs (32) busy at once only queue for CPU: if most connections are active, put a pooler such as PgBouncer in front"
+    }
+  ]
+}
