@@ -52,3 +52,38 @@ jobs:
       - uses: actions/checkout@v4
       - name: Every fixture host gets the expected statuses and exit code
         run: tests/run-fixtures.sh
+
+  json:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: --json is valid and matches the Markdown statuses
+        run: |
+          set +e; ./db_tuning_check.sh --sysroot tests/fixtures/defaults --json > d.json; rc=$?; set -e
+          jq . d.json
+          [ "$rc" -eq 1 ]
+          jq -e '.status == "WARN" and .counts.warn > 0 and .counts.crit == 0' d.json
+          jq -e '.checks[] | select(.check == "vm.swappiness") | .status == "WARN" and .value == "60"' d.json
+          jq -e '.postgresql[] | select(.setting == "shared_buffers") | .value == "3840MB"' d.json
+          set +e; ./db_tuning_check.sh --sysroot tests/fixtures/risky --json > r.json; rc=$?; set -e
+          [ "$rc" -eq 2 ]
+          jq -e '.status == "CRIT" and ([.checks[] | select(.status == "CRIT")] | length) == 2' r.json
+
+  distros:
+    # The same script on the distributions it is meant for: Bash, awk and
+    # coreutils from each base image, real /proc and /sys of the runner.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["rockylinux:9", "ubuntu:24.04", "debian:12"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run in ${{ matrix.image }}
+        run: |
+          docker run --rm -v "$PWD:/src:ro" -w /src "${{ matrix.image }}"             bash -c './db_tuning_check.sh --db-user root --json > /tmp/out.json; rc=$?; cat /tmp/out.json; exit $rc' > out.json || rc=$?
+          echo "exit code: ${rc:-0}"
+          [ "${rc:-0}" -le 2 ]
+          jq -e '.checks | length > 8' out.json
+          jq -e '.os | length > 0' out.json
+          jq -r '.os, .status, (.checks[] | "\(.status)	\(.check)	\(.value)")' out.json

@@ -5,7 +5,7 @@
 # See --help for usage and exit codes.
 set -euo pipefail
 
-readonly VERSION="0.0.6"
+readonly VERSION="0.0.7"
 readonly PROG=${0##*/}
 
 usage() {
@@ -26,6 +26,7 @@ Options:
                       (default: detected from /sys/block)
       --sysroot DIR   read /proc, /sys and /etc under DIR instead of /
                       (a saved snapshot of another host, or test fixtures)
+  -j, --json          print one JSON object instead of Markdown
   -h, --help          show this help and exit
   -V, --version       show the version and exit
 
@@ -47,10 +48,12 @@ ROOT=""
 SB=""
 MAX_CONN=100
 STORAGE=""
+JSON=0
 
 while [ $# -gt 0 ]; do
   case $1 in
     -h|--help)    usage; exit 0 ;;
+    -j|--json)    JSON=1; shift ;;
     -V|--version) echo "$PROG $VERSION"; exit 0 ;;
     -u|--db-user|--sysroot|-s|--shared-buffers|-c|--max-connections|--storage)
       [ $# -ge 2 ] || die "$1 needs a value (see --help)"
@@ -304,7 +307,7 @@ check_storage() {
     issues=() level=OK
     case ,$opts, in
       *,nobarrier,*|*,barrier=0,*)
-        level=CRIT; issues+=("write barriers are off: a power loss can corrupt the database; remove nobarrier/barrier=0") ;;
+        level=CRIT; issues+=("write barriers are off, so a power loss can corrupt the database: remove nobarrier/barrier=0") ;;
     esac
     case $fs in
       ext2|ext3)
@@ -319,7 +322,7 @@ check_storage() {
       issues+=("every read updates the access time: mount with noatime")
     fi
     if (( ${#issues[@]} )); then
-      hint=$(printf '%s. ' "${issues[@]}"); hint=${hint%. }
+      hint=$(printf '%s; ' "${issues[@]}"); hint=${hint%; }
     elif [ "$atime" = noatime ]; then
       hint="no access-time writes, barriers on"
     else
@@ -516,13 +519,51 @@ check_storage
 check_limits_cpu
 advise_postgres
 
-ok=0 warn=0 crit=0
+ok=0 warn=0 crit=0 skip=0
 for s in "${r_status[@]}"; do
-  case $s in OK) ok=$((ok + 1)) ;; WARN) warn=$((warn + 1)) ;; CRIT) crit=$((crit + 1)) ;; esac
+  case $s in
+    OK) ok=$((ok + 1)) ;; WARN) warn=$((warn + 1)) ;;
+    CRIT) crit=$((crit + 1)) ;; SKIP) skip=$((skip + 1)) ;;
+  esac
 done
 overall=OK
 (( worst == 1 )) && overall=WARN
 (( worst == 2 )) && overall=CRIT
+
+# js STRING: STRING as a JSON string literal.
+js() {
+  local s=$1
+  s=${s//\\/\\\\} s=${s//\"/\\\"}
+  s=${s//$'\t'/\\t} s=${s//$'\n'/\\n} s=${s//$'\r'/\\r}
+  printf '"%s"' "$s"
+}
+
+report_json() {
+  local i sep=""
+  printf '{"tool":"db_tuning_check","version":%s,"host":%s,"os":%s,"kernel":%s,' \
+    "$(js "$VERSION")" "$(js "$host")" "$(js "$distro")" "$(js "$kernel")"
+  printf '"cpus":%s,"ram_bytes":%s,"db_user":%s,' "${cpus:-null}" "$mem_b" "$(js "$DB_USER")"
+  printf '"status":"%s","counts":{"ok":%s,"warn":%s,"crit":%s,"skip":%s},"checks":[' \
+    "$overall" "$ok" "$warn" "$crit" "$skip"
+  for i in "${!r_name[@]}"; do
+    printf '%s{"section":%s,"check":%s,"value":%s,"status":"%s","hint":%s}' "$sep" \
+      "$(js "${r_sec[i]}")" "$(js "${r_name[i]}")" "$(js "${r_value[i]}")" "${r_status[i]}" "$(js "${r_hint[i]}")"
+    sep=,
+  done
+  printf '],"postgresql":['
+  sep=""
+  for i in "${!a_name[@]}"; do
+    printf '%s{"setting":%s,"value":%s,"why":%s}' "$sep" \
+      "$(js "${a_name[i]}")" "$(js "${a_value[i]}")" "$(js "${a_why[i]}")"
+    sep=,
+  done
+  printf ']}\n'
+}
+
+if (( JSON )); then
+  report_json
+  exit "$worst"
+fi
 
 echo "# Linux DB tuning check"
 echo
