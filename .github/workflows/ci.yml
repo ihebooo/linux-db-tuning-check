@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: ShellCheck
+        run: shellcheck db_tuning_check.sh
+
+  cli:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: --help and --version exit 0
+        run: |
+          ./db_tuning_check.sh --help | grep -q '^Usage:'
+          ./db_tuning_check.sh -h | grep -q '^Usage:'
+          ./db_tuning_check.sh --version | grep -q '^db_tuning_check.sh '
+      - name: Unknown option and missing --db-user value give exit 3
+        run: |
+          set +e
+          ./db_tuning_check.sh --nope; rc=$?; echo "exit code: $rc"; [ "$rc" -eq 3 ] || exit 1
+          ./db_tuning_check.sh --db-user; rc=$?; echo "exit code: $rc"; [ "$rc" -eq 3 ] || exit 1
+      - name: Report runs on the runner
+        run: |
+          ./db_tuning_check.sh -u runner | tee report.md
+          grep -q '^# Linux DB tuning check' report.md
+          grep -q '| DB OS user | runner |' report.md
