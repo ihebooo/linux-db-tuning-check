@@ -269,7 +269,8 @@ check_hugepages_numa() {
 
 check_storage() {
   local sec=Storage dev name sch rot kind found=0
-  local mnt fs opts atime issues level hint
+  local src mnt fs opts atime barrier issues level hint
+  local -A seen=()
 
   for dev in "$ROOT"/sys/block/*; do
     [ -e "$dev/queue/scheduler" ] || continue
@@ -294,8 +295,11 @@ check_storage() {
   (( found )) || add "$sec" "I/O scheduler" "no disk found" SKIP "no block device with a scheduler in /sys/block"
 
   found=0
-  while read -r _ mnt fs opts _; do
+  while read -r src mnt fs opts _; do
     case $fs in ext2|ext3|ext4|xfs|btrfs|zfs) ;; *) continue ;; esac
+    # One row per filesystem: bind mounts (containers, /etc/hosts, ...) repeat the device.
+    [ -z "${seen[$src|$fs]:-}" ] || continue
+    seen[$src|$fs]=1
     found=1
     mnt=$(printf '%b' "$mnt")   # /proc/mounts escapes a space as \040
     case ,$opts, in
@@ -304,9 +308,10 @@ check_storage() {
       *,lazytime,*)    atime=lazytime ;;
       *)               atime=strictatime ;;
     esac
-    issues=() level=OK
+    issues=() level=OK barrier=""
     case ,$opts, in
       *,nobarrier,*|*,barrier=0,*)
+        if [[ ,$opts, == *,nobarrier,* ]]; then barrier=", nobarrier"; else barrier=", barrier=0"; fi
         level=CRIT; issues+=("write barriers are off, so a power loss can corrupt the database: remove nobarrier/barrier=0") ;;
     esac
     case $fs in
@@ -328,7 +333,7 @@ check_storage() {
     else
       hint="fine; noatime saves a few more writes"
     fi
-    add "$sec" "Mount $mnt" "$fs, $atime" "$level" "$hint"
+    add "$sec" "Mount $mnt" "$fs, $atime$barrier" "$level" "$hint"
   done < <(cat "$ROOT/proc/mounts" 2>/dev/null || true)
   (( found )) || add "$sec" "Mounts" "no ext4/xfs/btrfs/zfs mount" SKIP "nothing to check in /proc/mounts"
 }

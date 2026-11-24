@@ -1,3 +1,4 @@
 /dev/nvme0n1p2 / xfs rw,relatime,attr2 0 0
 /dev/nvme0n1p3 /var/lib/pgsql xfs rw,noatime,attr2,inode64 0 0
 proc /proc proc rw 0 0
+/dev/nvme0n1p3 /var/lib/pgsql/backup\040copy xfs rw,noatime,attr2,inode64 0 0

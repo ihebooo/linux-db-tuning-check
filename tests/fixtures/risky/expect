@@ -11,3 +11,4 @@ CPU governor	OK
 tuned profile	OK
 setting	shared_buffers	2GB
 setting	random_page_cost	1.1
+Mount /archive	CRIT

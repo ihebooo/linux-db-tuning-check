@@ -67,7 +67,7 @@ jobs:
           jq -e '.postgresql[] | select(.setting == "shared_buffers") | .value == "3840MB"' d.json
           set +e; ./db_tuning_check.sh --sysroot tests/fixtures/risky --json > r.json; rc=$?; set -e
           [ "$rc" -eq 2 ]
-          jq -e '.status == "CRIT" and ([.checks[] | select(.status == "CRIT")] | length) == 2' r.json
+          jq -e '.status == "CRIT" and ([.checks[] | select(.status == "CRIT")] | length) == 3' r.json
 
   distros:
     # The same script on the distributions it is meant for: Bash, awk and
@@ -81,6 +81,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Run in ${{ matrix.image }}
         run: |
+          echo "runner filesystems:"; grep -E ' (ext[234]|xfs|btrfs) ' /proc/mounts || true
           docker run --rm -v "$PWD:/src:ro" -w /src "${{ matrix.image }}"             bash -c './db_tuning_check.sh --db-user root --json > /tmp/out.json; rc=$?; cat /tmp/out.json; exit $rc' > out.json || rc=$?
           echo "exit code: ${rc:-0}"
           [ "${rc:-0}" -le 2 ]
