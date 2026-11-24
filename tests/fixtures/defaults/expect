@@ -13,3 +13,10 @@ Processes (postgres)	OK
 fs.file-max	OK
 CPU governor	WARN
 tuned profile	WARN
+setting	shared_buffers	3840MB
+setting	effective_cache_size	11GB
+setting	work_mem	39MB
+setting	max_wal_size	4GB
+setting	min_wal_size	1GB
+setting	random_page_cost	1.1
+setting	huge_pages	try

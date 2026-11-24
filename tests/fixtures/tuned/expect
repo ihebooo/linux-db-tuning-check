@@ -1,3 +1,4 @@
+args	--max-connections 300
 exit	0
 vm.swappiness	OK
 vm.dirty_*	OK
@@ -14,3 +15,9 @@ Processes (postgres)	OK
 fs.file-max	OK
 CPU governor	OK
 tuned profile	OK
+setting	shared_buffers	15GB
+setting	maintenance_work_mem	2GB
+setting	work_mem	53MB
+setting	max_wal_size	8GB
+setting	huge_pages	on
+setting	max_connections	300

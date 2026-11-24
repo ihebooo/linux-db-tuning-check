@@ -36,6 +36,15 @@ jobs:
           grep -q '| DB OS user | runner |' report.md
           grep -Eq '^Overall: \*\*(OK|WARN|CRIT)\*\*' report.md
           grep -Eq '^\| vm\.swappiness \| [0-9]+ \| (OK|WARN) \|' report.md
+          grep -q '^## Suggested PostgreSQL settings' report.md
+          grep -Eq '^shared_buffers +=  ?[0-9]+(MB|GB)$' report.md
+      - name: Bad option values give exit 3
+        run: |
+          set +e
+          for args in "--max-connections 0" "--storage floppy" "--shared-buffers 8"; do
+            # shellcheck disable=SC2086
+            ./db_tuning_check.sh $args; rc=$?; echo "$args -> exit $rc"; [ "$rc" -eq 3 ] || exit 1
+          done
 
   fixtures:
     runs-on: ubuntu-latest

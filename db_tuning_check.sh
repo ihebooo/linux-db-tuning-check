@@ -5,7 +5,7 @@
 # See --help for usage and exit codes.
 set -euo pipefail
 
-readonly VERSION="0.0.5"
+readonly VERSION="0.0.6"
 readonly PROG=${0##*/}
 
 usage() {
@@ -20,6 +20,10 @@ Options:
   -s, --shared-buffers SIZE
                       planned PostgreSQL shared_buffers, e.g. 8GB, for the
                       huge pages check (default: 25 % of RAM)
+  -c, --max-connections N
+                      planned max_connections, for work_mem (default: 100)
+      --storage TYPE  ssd or hdd, for the planner cost settings
+                      (default: detected from /sys/block)
       --sysroot DIR   read /proc, /sys and /etc under DIR instead of /
                       (a saved snapshot of another host, or test fixtures)
   -h, --help          show this help and exit
@@ -41,23 +45,35 @@ die() { echo "$PROG: $*" >&2; exit 3; }
 DB_USER=postgres
 ROOT=""
 SB=""
+MAX_CONN=100
+STORAGE=""
 
 while [ $# -gt 0 ]; do
   case $1 in
     -h|--help)    usage; exit 0 ;;
     -V|--version) echo "$PROG $VERSION"; exit 0 ;;
-    -u|--db-user|--sysroot|-s|--shared-buffers)
+    -u|--db-user|--sysroot|-s|--shared-buffers|-c|--max-connections|--storage)
       [ $# -ge 2 ] || die "$1 needs a value (see --help)"
-      case $1 in --sysroot) ROOT=$2 ;; -s|--shared-buffers) SB=$2 ;; *) DB_USER=$2 ;; esac
+      case $1 in
+        --sysroot)                ROOT=$2 ;;
+        -s|--shared-buffers)      SB=$2 ;;
+        -c|--max-connections)     MAX_CONN=$2 ;;
+        --storage)                STORAGE=$2 ;;
+        *)                        DB_USER=$2 ;;
+      esac
       shift 2 ;;
-    --db-user=*)  DB_USER=${1#*=}; shift ;;
-    --shared-buffers=*) SB=${1#*=}; shift ;;
-    --sysroot=*)  ROOT=${1#*=}; shift ;;
-    *)            die "unknown option: $1 (see --help)" ;;
+    --db-user=*)         DB_USER=${1#*=}; shift ;;
+    --shared-buffers=*)  SB=${1#*=}; shift ;;
+    --max-connections=*) MAX_CONN=${1#*=}; shift ;;
+    --storage=*)         STORAGE=${1#*=}; shift ;;
+    --sysroot=*)         ROOT=${1#*=}; shift ;;
+    *)                   die "unknown option: $1 (see --help)" ;;
   esac
 done
 
 [ -n "$DB_USER" ] || die "--db-user must not be empty"
+[[ $MAX_CONN =~ ^[1-9][0-9]{0,5}$ ]] || die "--max-connections needs a number, e.g. 200"
+case $STORAGE in ""|ssd|hdd) ;; *) die "--storage must be ssd or hdd" ;; esac
 
 # to_bytes SIZE: PostgreSQL-style size (8GB, 512MB, 1TB, 64kB) to bytes.
 to_bytes() {
@@ -259,7 +275,7 @@ check_storage() {
     found=1
     sch=$(rd "/sys/block/$name/queue/scheduler") && sch=$(selected "$sch") || sch="?"
     rot=$(rd "/sys/block/$name/queue/rotational" || echo 0)
-    if (( rot == 1 )); then kind=HDD; else kind="SSD/NVMe"; fi
+    if (( rot == 1 )); then kind=HDD hdd_seen=1; else kind="SSD/NVMe" ssd_seen=1; fi
     case $kind:$sch in
       HDD:mq-deadline|HDD:deadline|"SSD/NVMe":none|"SSD/NVMe":noop|"SSD/NVMe":mq-deadline|"SSD/NVMe":deadline|"SSD/NVMe":kyber)
         add "$sec" "I/O scheduler $name" "$sch ($kind)" OK "a good fit for a database on $kind" ;;
@@ -409,12 +425,96 @@ check_limits_cpu() {
   fi
 }
 
+# ---------------------------------------------------------------- PostgreSQL settings
+
+# Suggested settings: one row per parameter, with the reasoning.
+a_name=() a_value=() a_why=()
+advise() { a_name+=("$1") a_value+=("$2") a_why+=("$3"); }
+
+# pg_size BYTES: a PostgreSQL size literal, rounded down to a tidy value.
+pg_size() {
+  local b=$1 mb=$(( $1 / 1024 / 1024 ))
+  if (( b >= 8 * 1024 ** 3 )); then echo "$(( b / 1024 ** 3 ))GB"
+  elif (( b >= 1024 ** 3 )); then
+    mb=$(( mb / 256 * 256 ))
+    if (( mb % 1024 == 0 )); then echo "$(( mb / 1024 ))GB"; else echo "${mb}MB"; fi
+  else echo "$(( mb > 1 ? mb : 1 ))MB"
+  fi
+}
+
+advise_postgres() {
+  local sb sb_why ecs mwm wm wal par gather storage storage_why nr size_kb
+  local c=${cpus:-1}
+  (( c > 0 )) || c=1
+
+  if [ -n "$SB" ]; then sb=$SB sb_why="from --shared-buffers"
+  else sb=$(( mem_b / 4 )) sb_why="25 % of RAM: the rest stays for the OS page cache, which PostgreSQL also reads through"
+  fi
+  advise shared_buffers "$(pg_size "$sb")" "$sb_why"
+
+  ecs=$(( mem_b * 3 / 4 ))
+  advise effective_cache_size "$(pg_size "$ecs")" "75 % of RAM: shared_buffers plus the page cache the planner can count on (no memory is allocated)"
+
+  mwm=$(( mem_b / 16 ))
+  (( mwm > 2 * 1024 ** 3 )) && mwm=$(( 2 * 1024 ** 3 ))
+  (( mwm < 64 * 1024 ** 2 )) && mwm=$(( 64 * 1024 ** 2 ))
+  advise maintenance_work_mem "$(pg_size "$mwm")" "RAM / 16, at most 2GB: faster VACUUM and CREATE INDEX"
+
+  wm=$(( (mem_b - sb) / (MAX_CONN * 3) ))
+  (( wm < 4 * 1024 ** 2 )) && wm=$(( 4 * 1024 ** 2 ))
+  advise work_mem "$(pg_size "$wm")" "(RAM - shared_buffers) / (max_connections $MAX_CONN x 3): per sort or hash, so a query can use several; raise per session for reports"
+
+  if (( mem_b < 4 * 1024 ** 3 )); then wal=1
+  elif (( mem_b < 32 * 1024 ** 3 )); then wal=4
+  else wal=8
+  fi
+  advise max_wal_size "${wal}GB" "fewer, calmer checkpoints than the 1GB default; watch checkpoints_req in pg_stat_bgwriter / pg_stat_checkpointer"
+  advise min_wal_size "$(pg_size $(( wal * 1024 ** 3 / 4 )))" "a quarter of max_wal_size: WAL files are recycled instead of created"
+  advise checkpoint_completion_target 0.9 "spread checkpoint writes over 90 % of the interval (default since PostgreSQL 14)"
+
+  if [ -n "$STORAGE" ]; then storage=$STORAGE storage_why="from --storage"
+  elif (( ${hdd_seen:-0} && ! ${ssd_seen:-0} )); then storage=hdd storage_why="every disk is rotational"
+  else storage=ssd storage_why="non-rotational disks detected"
+  fi
+  if [ "$storage" = ssd ]; then
+    advise random_page_cost 1.1 "SSD/NVMe ($storage_why): a random read costs about the same as a sequential one, so index scans get chosen"
+    advise effective_io_concurrency 200 "SSD/NVMe ($storage_why): many I/O requests in flight for bitmap heap scans"
+  else
+    advise random_page_cost 4 "HDD ($storage_why): seeks are expensive (PostgreSQL default)"
+    advise effective_io_concurrency 2 "HDD ($storage_why): a few concurrent requests per spindle"
+  fi
+
+  par=$(( c / 2 )); (( par > 4 )) && par=4; (( par < 1 )) && par=1
+  gather=$par
+  advise max_worker_processes "$(( c > 8 ? c : 8 ))" "one per CPU ($c), at least the default 8"
+  advise max_parallel_workers "$c" "one per CPU"
+  advise max_parallel_workers_per_gather "$gather" "half the CPUs, at most 4: one query must not take every core"
+  advise max_parallel_maintenance_workers "$par" "half the CPUs, at most 4, for CREATE INDEX"
+
+  size_kb=$(meminfo Hugepagesize)
+  if (( size_kb > 0 )); then
+    nr=$(( (sb + sb / 20 + size_kb * 1024 - 1) / (size_kb * 1024) ))
+    if (( $(meminfo HugePages_Total) >= nr )); then
+      advise huge_pages on "enough huge pages are reserved (vm.nr_hugepages >= $nr)"
+    else
+      advise huge_pages try "use huge pages once vm.nr_hugepages=$nr is reserved; falls back to normal pages until then"
+    fi
+  fi
+
+  if (( MAX_CONN > 4 * c )); then
+    advise max_connections "$MAX_CONN" "more than 4 x CPUs ($(( 4 * c ))) busy at once only queue for CPU: if most connections are active, put a pooler such as PgBouncer in front"
+  else
+    advise max_connections "$MAX_CONN" "fits $c CPUs"
+  fi
+}
+
 # ---------------------------------------------------------------- report
 
 check_memory
 check_hugepages_numa
 check_storage
 check_limits_cpu
+advise_postgres
 
 ok=0 warn=0 crit=0
 for s in "${r_status[@]}"; do
@@ -449,5 +549,24 @@ for i in "${!r_sec[@]}"; do
   fi
   echo "| $(cell "${r_name[i]}") | $(cell "${r_value[i]}") | ${r_status[i]} | $(cell "${r_hint[i]}") |"
 done
+
+echo
+echo "## Suggested PostgreSQL settings"
+echo
+echo "Starting values for a server dedicated to PostgreSQL, computed from $(hb "$mem_b") RAM and ${cpus:-?} CPUs."
+echo "Measure and adjust; they are not a substitute for load testing."
+echo
+echo "| Setting | Suggested | Why |"
+echo "|---|---|---|"
+for i in "${!a_name[@]}"; do
+  echo "| ${a_name[i]} | ${a_value[i]} | $(cell "${a_why[i]}") |"
+done
+echo
+echo '```ini'
+echo "# postgresql.conf — suggested by $PROG $VERSION for $host"
+for i in "${!a_name[@]}"; do
+  printf '%-32s = %s\n' "${a_name[i]}" "${a_value[i]}"
+done
+echo '```'
 
 exit "$worst"

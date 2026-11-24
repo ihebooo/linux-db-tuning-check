@@ -1,3 +1,4 @@
+args	--shared-buffers 2GB --storage ssd
 exit	2
 I/O scheduler sda	WARN
 Mount /	OK
@@ -8,3 +9,5 @@ Processes (postgres)	WARN
 fs.file-max	WARN
 CPU governor	OK
 tuned profile	OK
+setting	shared_buffers	2GB
+setting	random_page_cost	1.1
